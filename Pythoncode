@@ -1,0 +1,105 @@
+"""
+* Jonny's version
+"""
+import re
+import json
+import pandas
+import requests
+import geopandas
+from bs4 import BeautifulSoup
+
+headers = {'User-agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.186 Safari/537.36'}
+
+def has_balcony(url):
+    """
+    Follow individual property link, assess balcony and get coords
+    """
+    try:
+        # fetch property website
+        response = requests.get("https://www.rightmove.co.uk" + url, headers = headers)
+        data = re.search(r"window\.PAGE_MODEL = (\{.*\})", response.text).group(1)
+        data = json.loads(data)
+
+        # does it have a balcony?
+        description = data["propertyData"]["text"]["description"].lower()
+        is_balcony = 'balcon' in description
+        url_tmp =  data["propertyData"]["staticMapImgUrls"]["staticMapImgUrlDesktopLarge"]
+        
+        # what are the coordinates?
+        longitude = float(re.findall(r"longitude=-?\d+.\d+", url_tmp)[0][10:])
+        latitude = float(re.findall(r"latitude=-?\d+.\d+", url_tmp)[0][9:])
+        return is_balcony, longitude, latitude
+    except:
+        return None, None, None
+
+
+def fetch_parse(url):
+    """
+    parse a page of results
+    """
+    # fetch web page
+    response = requests.get(url, headers = headers)
+
+    try:
+        content = BeautifulSoup(response.text, 'lxml')
+
+        # get the address data
+        results['address'] += [ address['content'] for address in content.findAll('meta', {'itemprop': 'streetAddress'}) ]
+        
+        # follow the property url to see if it has a balcony
+        for i, property_page in enumerate(content.findAll('a', {'class': 'propertyCard-link'})):
+            if i % 2 == 0:  # ignore every other one
+                continue
+            is_balcony, longitude, latitude = has_balcony(property_page.get("href"))
+            results['balcony'].append(is_balcony)
+            results['longitude'].append(longitude)
+            results['latitude'].append(latitude)
+
+        # return how many properties there are in total
+        return int(content.findAll('span', {'class': "searchHeader-resultCount"})[0].get_text().replace(",", ""))
+    
+    except:
+        print()
+        print("Whoops!")
+        print(url)
+        print()
+        return None
+
+
+# should it be a flat?
+FLAT = True
+flats = 'flat' if FLAT else ''
+suffix = 'flat' if FLAT else 'all'
+
+# both sale and rent
+for SALE in [True, False]:
+
+    # create / refresh results object
+    results = {
+        'address': [],
+        'balcony': [],
+        'longitude': [],
+        'latitude': []
+    }
+
+    # loop through all pages - only 1050 results can be returned by the website
+    for index in range(0, 1050, 24):
+        print(index)
+        if SALE:
+            url = 'https://www.rightmove.co.uk/property-for-sale/find.html?searchType=SALE&locationIdentifier=REGION%5E79192&index=' + str(index) + f'&insId=1&radius=0.0&minPrice=&maxPrice=&minBedrooms=&maxBedrooms=&displayPropertyType={flats}&maxDaysSinceAdded=&_includeSSTC=on&sortByPriceDescending=&primaryDisplayPropertyType=&secondaryDisplayPropertyType=&oldDisplayPropertyType=&oldPrimaryDisplayPropertyType=&newHome=&auction=false'
+        else:
+            url = 'https://www.rightmove.co.uk/property-to-rent/find.html?searchType=RENT&locationIdentifier=REGION%5E79192&index=' + str(index) + f'&insId=1&radius=0.0&minPrice=&maxPrice=&minBedrooms=&maxBedrooms=&displayPropertyType={flats}&maxDaysSinceAdded=&sortByPriceDescending=&_includeLetAgreed=on&primaryDisplayPropertyType=&secondaryDisplayPropertyType=&oldDisplayPropertyType=&oldPrimaryDisplayPropertyType=&letType=&letFurnishType=&houseFlatShare='
+        t = fetch_parse(url)
+        if t is None:
+            break
+
+    # dataframe and csv file, geodataframe and shapefile
+    df = pandas.DataFrame(results)
+    df.to_csv(f"gm_balconies_sale_{suffix}.csv" if SALE else f"gm_balconies_rent_{suffix}.csv")
+    gdf = geopandas.GeoDataFrame(df, geometry=geopandas.points_from_xy(df['longitude'], df['latitude'], crs="EPSG:4326"))
+    gdf.to_file(f"gm_balconies_sale_{suffix}.shp" if SALE else f"gm_balconies_rent_{suffix}.shp")
+
+    # report outcome & beep
+    n = len(gdf[gdf.balcony == True].index)
+    print("buy:" if SALE else "rent:", f"{n} of 1050 ({n / len(gdf.index) * 100:.0f}%)")
+    print("\a")
